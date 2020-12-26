@@ -151,11 +151,11 @@ func (h *HTTP) parseRequest(
 		return fmt.Sprintf("%v", v)
 	}
 
-	handleObjectBody := func(data map[string]interface{}) error {
+	handleObjectBody := func(data map[string]interface{}, keyOrder []string) error {
 		if !requestContainsFile(data) {
 			bodyQuery := make(url.Values, len(data))
-			for k, v := range data {
-				bodyQuery.Set(k, formatFormVal(v))
+			for _, v := range keyOrder {
+				bodyQuery.Set(v, formatFormVal(data[v]))
 			}
 			result.Body = bytes.NewBufferString(bodyQuery.Encode())
 			result.Req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -169,8 +169,8 @@ func (h *HTTP) parseRequest(
 		// For parameters of type common.FileData, created with open(file, "b"),
 		// we write the file boundary to the body buffer.
 		// Otherwise parameters are treated as standard form field.
-		for k, v := range data {
-			switch ve := v.(type) {
+		for _, v := range keyOrder {
+			switch ve := data[v].(type) {
 			case FileData:
 				// writing our own part to handle receiving
 				// different content-type than the default application/octet-stream
@@ -178,7 +178,7 @@ func (h *HTTP) parseRequest(
 				escapedFilename := escapeQuotes(ve.Filename)
 				h.Set("Content-Disposition",
 					fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
-						k, escapedFilename))
+						v, escapedFilename))
 				h.Set("Content-Type", ve.ContentType)
 
 				// this writer will be closed either by the next part or
@@ -192,12 +192,12 @@ func (h *HTTP) parseRequest(
 					return err
 				}
 			default:
-				fw, err := mpw.CreateFormField(k)
+				fw, err := mpw.CreateFormField(v)
 				if err != nil {
 					return err
 				}
 
-				if _, err := fw.Write([]byte(formatFormVal(v))); err != nil {
+				if _, err := fw.Write([]byte(formatFormVal(data[v]))); err != nil {
 					return err
 				}
 			}
@@ -212,6 +212,19 @@ func (h *HTTP) parseRequest(
 	}
 
 	if body != nil {
+		var payloadKeyOrder []string
+		if params != nil && !goja.IsUndefined(params) && !goja.IsNull(params) {
+			params := params.ToObject(rt)
+			for _, k := range params.Keys() {
+				switch k {
+				case "payloadKeyOrder":
+					keyOrder := params.Get(k).ToObject(rt)
+					for _, k := range keyOrder.Keys() {
+						payloadKeyOrder = append(payloadKeyOrder, keyOrder.Get(k).String())
+					}
+				}
+			}
+		}
 		switch data := body.(type) {
 		case map[string]goja.Value:
 			// TODO: fix forms submission and serialization in k6/html before fixing this..
@@ -219,11 +232,21 @@ func (h *HTTP) parseRequest(
 			for k, v := range data {
 				newData[k] = v.Export()
 			}
-			if err := handleObjectBody(newData); err != nil {
+			if payloadKeyOrder == nil {
+				for k := range newData {
+					payloadKeyOrder = append(payloadKeyOrder, k)
+				}
+			}
+			if err := handleObjectBody(newData, payloadKeyOrder); err != nil {
 				return nil, err
 			}
 		case map[string]interface{}:
-			if err := handleObjectBody(data); err != nil {
+			if payloadKeyOrder == nil {
+				for k := range data {
+					payloadKeyOrder = append(payloadKeyOrder, k)
+				}
+			}
+			if err := handleObjectBody(data, payloadKeyOrder); err != nil {
 				return nil, err
 			}
 		case string:
